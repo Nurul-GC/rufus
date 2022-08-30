@@ -1079,6 +1079,7 @@ int GetDriveNumber(HANDLE hDrive, char* path)
 	}
 	if (r >= MAX_DRIVES) {
 		uprintf("Device Number for device %s is too big (%d) - ignoring device", path, r);
+		uprintf("NOTE: This may be due to an excess of Virtual Drives, such as hidden ones created by the XBox PC app");
 		return -1;
 	}
 	return r;
@@ -2427,7 +2428,12 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 			return FALSE;
 		}
 	} else {
-		DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = write_as_esp ? PARTITION_GENERIC_ESP : PARTITION_MICROSOFT_DATA;
+		if (write_as_esp)
+			DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = PARTITION_GENERIC_ESP;
+		else if (IS_EXT(file_system))
+			DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = PARTITION_LINUX_DATA;
+		else
+			DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = PARTITION_MICROSOFT_DATA;
 		IGNORE_RETVAL(CoCreateGuid(&DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionId));
 		wcsncpy(DriveLayoutEx.PartitionEntry[pn].Gpt.Name, main_part_name, ARRAYSIZE(DriveLayoutEx.PartitionEntry[pn].Gpt.Name));
 	}
@@ -2453,9 +2459,14 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 			partition_offset[PI_ESP] = SelectedDrive.PartitionOffset[pn];
 
 		if (partition_style == PARTITION_STYLE_GPT) {
-			DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = (extra_partitions & XP_ESP) ? PARTITION_GENERIC_ESP : PARTITION_MICROSOFT_DATA;
+			if (extra_partitions & XP_ESP)
+				DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = PARTITION_GENERIC_ESP;
+			else if (extra_partitions & XP_CASPER)
+				DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = PARTITION_LINUX_DATA;
+			else
+				DriveLayoutEx.PartitionEntry[pn].Gpt.PartitionType = PARTITION_MICROSOFT_DATA;
 			if (extra_partitions & XP_UEFI_NTFS) {
-				// Prevent a drive letter to be assigned to the UEFI:NTFS partition
+				// Prevent a drive letter from being assigned to the UEFI:NTFS partition
 				DriveLayoutEx.PartitionEntry[pn].Gpt.Attributes = GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER;
 #if !defined(_DEBUG)
 				// Also make the partition read-only for release versions

@@ -1,6 +1,6 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
- * Copyright © 2011-2021 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2022 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -39,6 +39,7 @@
 #include <delayimp.h>
 
 #include "rufus.h"
+#include "format.h"
 #include "missing.h"
 #include "resource.h"
 #include "msapi_utf8.h"
@@ -46,6 +47,8 @@
 
 #include "ui.h"
 #include "re.h"
+#include "vhd.h"
+#include "wue.h"
 #include "drive.h"
 #include "settings.h"
 #include "bled/bled.h"
@@ -63,8 +66,8 @@ enum bootcheck_return {
 static const char* cmdline_hogger = "rufus.com";
 static const char* ep_reg = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer";
 static const char* vs_reg = "Software\\Microsoft\\VisualStudio";
-static const char* arch_name[MAX_ARCHS] = {
-	"x86_32", "Itanic", "x86_64", "ARM", "ARM64", "EBC","Risc-V 32", "Risc-V 64", "Risc-V 128" };
+static const char* arch_name[ARCH_MAX] = {
+	"unknown", "x86_32", "x86_64", "ARM", "ARM64", "Itanic", "RISC-V 32", "RISC-V 64", "RISC-V 128", "EBC" };
 static BOOL existing_key = FALSE;	// For LGP set/restore
 static BOOL size_check = TRUE;
 static BOOL log_displayed = FALSE;
@@ -115,17 +118,17 @@ DWORD MainThreadId;
 HWND hDeviceList, hPartitionScheme, hTargetSystem, hFileSystem, hClusterSize, hLabel, hBootType, hNBPasses, hLog = NULL;
 HWND hImageOption, hLogDialog = NULL, hProgress = NULL, hDiskID;
 HANDLE dialog_handle = NULL;
-BOOL is_x86_32, use_own_c32[NB_OLD_C32] = { FALSE, FALSE }, mbr_selected_by_user = FALSE;
+BOOL is_x86_32, use_own_c32[NB_OLD_C32] = { FALSE, FALSE }, mbr_selected_by_user = FALSE, lock_drive = TRUE;
 BOOL op_in_progress = TRUE, right_to_left_mode = FALSE, has_uefi_csm = FALSE, its_a_me_mario = FALSE;
-BOOL enable_HDDs = FALSE, enable_VHDs = TRUE, enable_ntfs_compression = FALSE, no_confirmation_on_cancel = FALSE, lock_drive = TRUE;
-BOOL advanced_mode_device, advanced_mode_format, allow_dual_uefi_bios, detect_fakes, enable_vmdk, force_large_fat32, usb_debug;
-BOOL use_fake_units, preserve_timestamps = FALSE, fast_zeroing = FALSE, app_changed_size = FALSE;
+BOOL enable_HDDs = FALSE, enable_VHDs = TRUE, enable_ntfs_compression = FALSE, no_confirmation_on_cancel = FALSE;
+BOOL advanced_mode_device, advanced_mode_format, allow_dual_uefi_bios, detect_fakes, enable_vmdk, force_large_fat32;
+BOOL usb_debug, use_fake_units, preserve_timestamps = FALSE, fast_zeroing = FALSE, app_changed_size = FALSE;
 BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE, enable_file_indexing, large_drive = FALSE;
 BOOL write_as_image = FALSE, write_as_esp = FALSE, use_vds = FALSE, ignore_boot_marker = FALSE;
 BOOL appstore_version = FALSE, is_vds_available = TRUE;
 float fScale = 1.0f;
 int dialog_showing = 0, selection_default = BT_IMAGE, persistence_unit_selection = -1, imop_win_sel = 0;
-int default_fs, fs_type, boot_type, partition_type, target_type; // file system, boot type, partition type, target type
+int default_fs, fs_type, boot_type, partition_type, target_type;
 int force_update = 0, default_thread_priority = THREAD_PRIORITY_ABOVE_NORMAL;
 char szFolderPath[MAX_PATH], app_dir[MAX_PATH], system_dir[MAX_PATH], temp_dir[MAX_PATH], sysnative_dir[MAX_PATH];
 char app_data_dir[MAX_PATH], user_dir[MAX_PATH];
@@ -782,7 +785,7 @@ static void EnableExtendedLabel(BOOL enable, BOOL remove_checkboxes)
 	static UINT checked, state = 0;
 	HWND hCtrl = GetDlgItem(hMainDialog, IDC_EXTENDED_LABEL);
 
-	if ((fs_type >= FS_EXT2) || ((boot_type == BT_IMAGE) && IS_DD_ONLY(img_report)))
+	if (IS_EXT(fs_type) || ((boot_type == BT_IMAGE) && IS_DD_ONLY(img_report)))
 		enable = FALSE;
 
 	if (remove_checkboxes) {
@@ -1168,31 +1171,29 @@ static void UpdateImage(BOOL update_image_option_only)
 
 	ComboBox_ResetContent(hImageOption);
 
-	if (!img_report.is_windows_img) {	// Straight install.wim/install.esd only have Windows To Go option
-		// Can't remove restrictions if running on Windows 7 or when running the appstore version
-		if (nWindowsVersion >= WINDOWS_8 && !appstore_version && img_report.win_version.major == 11) {
-			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_322)), IMOP_WIN_STANDARD));
-			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_323)), IMOP_WIN_EXTENDED));
-		} else {
-			IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_117)), IMOP_WIN_STANDARD));
-		}
-	}
+	if (!img_report.is_windows_img)	// Straight install.wim/install.esd only have Windows To Go option
+		IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_117)), IMOP_WIN_STANDARD));
 	IGNORE_RETVAL(ComboBox_SetItemData(hImageOption, ComboBox_AddStringU(hImageOption, lmprintf(MSG_118)), IMOP_WIN_TO_GO));
 	IGNORE_RETVAL(ComboBox_SetCurSel(hImageOption, imop_win_sel));
 }
 
-static uint8_t FindArch(const char* filename)
+/// <summary>
+/// Parse a PE executable file and return its CPU architecture.
+/// </summary>
+/// <param name="path">The path of the PE executable to parse.</param>
+/// <returns>An enum ArchType value (as defined in rufus.h)</returns>
+static uint8_t FindArch(const char* path)
 {
-	uint8_t ret = 0;
+	uint8_t ret = ARCH_UNKNOWN;
 	HANDLE hFile = NULL, hFileMapping = NULL;
 	PIMAGE_DOS_HEADER pImageDOSHeader = NULL;
 	// NB: The field we are after is at the same location for 32 and 64-bit
 	// PE headers, so we don't need to care about using PIMAGE_NT_HEADERS[32|64]
 	PIMAGE_NT_HEADERS pImageNTHeader = NULL;
 
-	hFile = CreateFileU(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	hFile = CreateFileU(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
 	if (hFile == NULL) {
-		uprintf("FindArch: Could not open file '%s': %s", filename, WindowsErrorString());
+		uprintf("FindArch: Could not open file '%s': %s", path, WindowsErrorString());
 		return 0;
 	}
 
@@ -1219,31 +1220,31 @@ static uint8_t FindArch(const char* filename)
 
 	switch (pImageNTHeader->FileHeader.Machine) {
 	case IMAGE_FILE_MACHINE_I386:
-		ret = 1;
-		break;
-	case IMAGE_FILE_MACHINE_IA64:
-		ret = 2;
+		ret = ARCH_X86_32;
 		break;
 	case IMAGE_FILE_MACHINE_AMD64:
-		ret = 3;
+		ret = ARCH_X86_64;
 		break;
 	case IMAGE_FILE_MACHINE_ARM:
-		ret = 4;
+		ret = ARCH_ARM_32;
 		break;
 	case IMAGE_FILE_MACHINE_ARM64:
-		ret = 5;
+		ret = ARCH_ARM_64;
 		break;
-	case IMAGE_FILE_MACHINE_EBC:
-		ret = 6;
+	case IMAGE_FILE_MACHINE_IA64:
+		ret = ARCH_IA_64;
 		break;
 	case IMAGE_FILE_MACHINE_RISCV32:
-		ret = 7;
+		ret = ARCH_RISCV_32;
 		break;
 	case IMAGE_FILE_MACHINE_RISCV64:
-		ret = 8;
+		ret = ARCH_RISCV_64;
 		break;
 	case IMAGE_FILE_MACHINE_RISCV128:
-		ret = 9;
+		ret = ARCH_RISCV_128;
+		break;
+	case IMAGE_FILE_MACHINE_EBC:
+		ret = ARCH_EBC;
 		break;
 	}
 
@@ -1252,7 +1253,7 @@ out:
 		UnmapViewOfFile(pImageDOSHeader);
 	safe_closehandle(hFileMapping);
 	safe_closehandle(hFile);
-	assert(ret <= MAX_ARCHS);
+	assert(ret < ARCH_MAX);
 	return ret;
 }
 
@@ -1263,13 +1264,13 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 	// where we should apply an inst.stage2 ➔ inst.repo workaround for ISO
 	// mode (per: https://github.com/rhinstaller/anaconda/pull/3529).
 	const char* redhat8_derivative[] = {
-		"^AlmaLinux-8.*",		// AlmaLinux 8.x
-		"^Fedora.*-3[3-9].*",	// Fedora 33-39
-		"^CentOS.*-8.*",		// CentOS and CentOS Stream 8.x
-		"^OL-8.*",				// Oracle Linux 8.x
-		"^RHEL-8.*",			// Red Hat 8.x
-		"^Rocky-8.*",			// Rocky Linux 8.x
-		"^MIRACLE-LINUX-8-.*",	// MIRACLE LINUX 8.x
+		"^AlmaLinux-[8-9].*",		// AlmaLinux 8.x and 9.x
+		"^Fedora.*-3[3-9].*",		// Fedora 33-39
+		"^CentOS.*-[8-9].*",		// CentOS and CentOS Stream 8.and 9.x
+		"^OL-[8-9].*",				// Oracle Linux 8.x and 9.x
+		"^RHEL-[8-9].*",			// Red Hat 8.x and 9.x
+		"^Rocky-[8-9].*",			// Rocky Linux 8.x and 9.x
+		"^MIRACLE-LINUX-[8-9].*",	// MIRACLE LINUX 8.x and 9.x
 	};
 	int i, len;
 	uint8_t arch;
@@ -1291,7 +1292,7 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 		(!img_report.is_iso && (img_report.is_bootable_img <= 0) && !img_report.is_windows_img)) {
 		// Failed to scan image
 		if (img_report.is_bootable_img < 0)
-			MessageBoxExU(hMainDialog, lmprintf(MSG_325, image_path), lmprintf(MSG_042), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
+			MessageBoxExU(hMainDialog, lmprintf(MSG_322, image_path), lmprintf(MSG_042), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
 		else
 			MessageBoxExU(hMainDialog, lmprintf(MSG_082), lmprintf(MSG_081), MB_OK | MB_ICONINFORMATION | MB_IS_RTL, selected_langid);
 		// Make sure to relinquish image_path before we call UpdateImage
@@ -1315,7 +1316,8 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 			if (WimExtractFile(image_path, 1, "Windows\\Boot\\EFI\\bootmgr.efi", tmp_path, TRUE)) {
 				arch = FindArch(tmp_path);
 				if (arch != 0) {
-					uprintf("  Image contains a%s %s EFI boot manager", arch_name[arch - 1], (arch < 7) ? "n" : "");
+					uprintf("  Image contains a%s %s EFI boot manager",
+						(arch >= ARCH_RISCV_32 && arch <= ARCH_RISCV_128) ? "" : "n", arch_name[arch]);
 					img_report.has_efi = 1 | (1 << arch);
 					img_report.has_bootmgr_efi = TRUE;
 					img_report.wininst_index = 1;
@@ -1405,6 +1407,8 @@ out:
 	ExitThread(0);
 }
 
+#define MAP_BIT(bit) do { map[_log2(bit)] = b; b <<= 1; } while(0)
+
 // Likewise, boot check will block message processing => use a thread
 static DWORD WINAPI BootCheckThread(LPVOID param)
 {
@@ -1413,6 +1417,7 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 	DWORD len;
 	WPARAM ret = BOOTCHECK_CANCEL;
 	BOOL in_files_dir = FALSE, esp_already_asked = FALSE;
+	BOOL is_windows_to_go = ((image_options & IMOP_WINTOGO) && (ComboBox_GetCurItemData(hImageOption) == IMOP_WIN_TO_GO));
 	const char* grub = "grub";
 	const char* core_img = "core.img";
 	const char* ldlinux = "ldlinux";
@@ -1454,23 +1459,20 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE * MB) && HAS_REGULAR_EFI(img_report) &&
 					(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type)) {
 					char* choices[3] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP"), lmprintf(MSG_277, dd_image) };
-					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
-						choices, 3);
+					i = SelectionDialog(BS_AUTORADIOBUTTON, lmprintf(MSG_274, "ISOHybrid"),
+						lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), choices, 3, 1);
 					if (i < 0)	// Cancel
 						goto out;
-					else if (i == 2)
-						write_as_esp = TRUE;
-					else if (i == 3)
-						write_as_image = TRUE;
+					write_as_esp = (i & 2);
+					write_as_image = (i & 4);
 					esp_already_asked = TRUE;
 				} else {
 					char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, dd_image) };
-					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image),
-						choices, 2);
+					i = SelectionDialog(BS_AUTORADIOBUTTON, lmprintf(MSG_274, "ISOHybrid"),
+						lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), choices, 2, 1);
 					if (i < 0)	// Cancel
 						goto out;
-					else if (i == 2)
-						write_as_image = TRUE;
+					write_as_image = (i & 2);
 				}
 			}
 		}
@@ -1480,7 +1482,7 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				goto out;
 		}
 
-		if ((image_options & IMOP_WINTOGO) && (ComboBox_GetCurItemData(hImageOption) == IMOP_WIN_TO_GO)) {
+		if (is_windows_to_go) {
 			if (fs_type != FS_NTFS) {
 				// Windows To Go only works for NTFS
 				MessageBoxExU(hMainDialog, lmprintf(MSG_097, "Windows To Go"), lmprintf(MSG_092), MB_OK|MB_ICONERROR|MB_IS_RTL, selected_langid);
@@ -1503,6 +1505,37 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				goto out;
 			default:
 				break;
+			}
+			if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_1X(img_report)) {
+				StrArray options;
+				int arch = _log2(img_report.has_efi >> 1);
+				uint8_t map[8] = { 0 }, b = 1;
+				StrArrayCreate(&options, 2);
+				if (img_report.win_version.build >= 22500) {
+					StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
+					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
+				}
+				StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
+				MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
+				StrArrayAdd(&options, lmprintf(MSG_332), TRUE);
+				MAP_BIT(UNATTEND_OFFLINE_INTERNAL_DRIVES);
+				StrArrayAdd(&options, lmprintf(MSG_333), TRUE);
+				MAP_BIT(UNATTEND_DUPLICATE_USER);
+				StrArrayAdd(&options, lmprintf(MSG_334), TRUE);
+				MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
+				i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_327), lmprintf(MSG_328),
+					options.String, options.Index, remap8(unattend_xml_mask, map, FALSE));
+				StrArrayDestroy(&options);
+				if (i < 0)
+					goto out;
+				// Remap i to the correct bit positions before calling CreateUnattendXml()
+				i = remap8(i, map, TRUE);
+				unattend_xml_path = CreateUnattendXml(arch, i | UNATTEND_WINDOWS_TO_GO);
+				// Keep the bits we didn't process
+				unattend_xml_mask &= ~(remap8(0xff, map, TRUE));
+				// And add back the bits we did process
+				unattend_xml_mask |= i;
+				WriteSetting32(SETTING_WUE_OPTIONS, (UNATTEND_DEFAULT_MASK << 16) | unattend_xml_mask);
 			}
 		} else if (target_type == TT_UEFI) {
 			if (!IS_EFI_BOOTABLE(img_report)) {
@@ -1534,6 +1567,37 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			MessageBoxExU(hMainDialog, lmprintf(MSG_100), lmprintf(MSG_099), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
 			goto out;
 		}
+		if ((nWindowsVersion >= WINDOWS_8) && IS_WINDOWS_1X(img_report) && (!is_windows_to_go)) {
+			StrArray options;
+			int arch = _log2(img_report.has_efi >> 1);
+			uint8_t map[8] = { 0 }, b = 1;
+			StrArrayCreate(&options, 4);
+			if (IS_WINDOWS_11(img_report)) {
+				StrArrayAdd(&options, lmprintf(MSG_329), TRUE);
+				MAP_BIT(UNATTEND_SECUREBOOT_TPM_MINRAM);
+			}
+			if (img_report.win_version.build >= 22500) {
+				StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
+				MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
+			}
+			StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
+			MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
+			StrArrayAdd(&options, lmprintf(MSG_333), TRUE);
+			MAP_BIT(UNATTEND_DUPLICATE_USER);
+			StrArrayAdd(&options, lmprintf(MSG_334), TRUE);
+			MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
+			i = SelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_327), lmprintf(MSG_328),
+				options.String, options.Index, remap8(unattend_xml_mask, map, FALSE));
+			StrArrayDestroy(&options);
+			if (i < 0)
+				goto out;
+			i = remap8(i, map, TRUE);
+			unattend_xml_path = CreateUnattendXml(arch, i);
+			// Remember the user preferences for the current session.
+			unattend_xml_mask &= ~(remap8(0xff, map, TRUE));
+			unattend_xml_mask |= i;
+			WriteSetting32(SETTING_WUE_OPTIONS, (UNATTEND_DEFAULT_MASK << 16) | unattend_xml_mask);
+		}
 
 		if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE * MB) && HAS_REGULAR_EFI(img_report) &&
 			(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type) && !esp_already_asked) {
@@ -1541,11 +1605,10 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			// so ask the users if they want to write it as an ESP.
 			char* iso_image = lmprintf(MSG_036);
 			char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP") };
-			i = SelectionDialog(lmprintf(MSG_274, "ESP"), lmprintf(MSG_310), choices, 2);
+			i = SelectionDialog(BS_AUTORADIOBUTTON, lmprintf(MSG_274, "ESP"), lmprintf(MSG_310), choices, 2, 1);
 			if (i < 0)	// Cancel
 				goto out;
-			else if (i == 2)
-				write_as_esp = TRUE;
+			write_as_esp = (i & 2);
 		}
 
 		// If the selected target doesn't include BIOS, skip file downloads for GRUB/Syslinux
@@ -1917,7 +1980,7 @@ static void InitDialog(HWND hDlg)
 	uprintf("Syslinux versions: %s%s, %s%s", embedded_sl_version_str[0], embedded_sl_version_ext[0],
 		embedded_sl_version_str[1], embedded_sl_version_ext[1]);
 	uprintf("Grub versions: %s, %s", GRUB4DOS_VERSION, GRUB2_PACKAGE_VERSION);
-	uprintf("System locale ID: 0x%04X (%s)", GetUserDefaultUILanguage(), GetCurrentMUI());
+	uprintf("System locale ID: 0x%04X (%s)", GetUserDefaultUILanguage(), ToLocaleName(GetUserDefaultUILanguage()));
 	ubflush();
 	if (selected_locale->ctrl_id & LOC_NEEDS_UPDATE) {
 		uprintf("NOTE: The %s translation requires an update, but the current translator hasn't submitted "
@@ -2192,7 +2255,7 @@ out:
 }
 
 #ifdef RUFUS_TEST
-extern BOOL RemoveWindows11Restrictions(char drive_letter);
+extern BOOL ApplyWindowsCustomization(char drive_letter);
 
 static DWORD WINAPI TestThread(LPVOID param)
 {
@@ -2203,7 +2266,7 @@ static DWORD WINAPI TestThread(LPVOID param)
 		ExitThread(1);
 	}
 	processing = TRUE;
-	RemoveWindows11Restrictions('B');
+	ApplyWindowsCustomization('B');
 	processing = FALSE;
 	ExitThread(0);
 }
@@ -2603,6 +2666,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			fs_type = (int)ComboBox_GetCurItemData(hFileSystem);
 			write_as_image = FALSE;
 			write_as_esp = FALSE;
+			unattend_xml_flags = 0;
 			// Disable all controls except Cancel
 			EnableControls(FALSE, FALSE);
 			FormatStatus = 0;
@@ -3036,6 +3100,10 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		if (queued_hotplug_event)
 			SendMessage(hDlg, UM_MEDIA_CHANGE, 0, 0);
 		if (wParam == BOOTCHECK_CANCEL) {
+			if (unattend_xml_path != NULL) {
+				DeleteFileU(unattend_xml_path);
+				unattend_xml_path = NULL;
+			}
 			EnableControls(TRUE, FALSE);
 			break;
 		}
@@ -3046,6 +3114,10 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 	case UM_FORMAT_COMPLETED:
 		zero_drive = FALSE;
 		format_thread = NULL;
+		if (unattend_xml_path != NULL) {
+			DeleteFileU(unattend_xml_path);
+			unattend_xml_path = NULL;
+		}
 		// Stop the timer
 		KillTimer(hMainDialog, TID_APP_TIMER);
 		// Close the cancel MessageBox and Blocking notification if active
@@ -3220,6 +3292,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	const char* rufus_loc = "rufus.loc";
 	int i, opt, option_index = 0, argc = 0, si = 0, lcid = GetUserDefaultUILanguage();
 	int wait_for_mutex = 0;
+	uint32_t wue_options;
 	FILE* fd;
 	BOOL attached_console = FALSE, external_loc_file = FALSE, lgp_set = FALSE, automount = TRUE;
 	BOOL disable_hogger = FALSE, previous_enable_HDDs = FALSE, vc = IsRegistryNode(REGKEY_HKCU, vs_reg);
@@ -3483,6 +3556,14 @@ skip_args_processing:
 	enable_VHDs = !ReadSettingBool(SETTING_DISABLE_VHDS);
 	enable_extra_hashes = ReadSettingBool(SETTING_ENABLE_EXTRA_HASHES);
 	ignore_boot_marker = ReadSettingBool(SETTING_IGNORE_BOOT_MARKER);
+	// This restores the Windows User Experience/unattend.xml mask from the saved user
+	// settings, and is designed to work even if we add new options later.
+	wue_options = ReadSetting32(SETTING_WUE_OPTIONS);
+	if ((wue_options >> 16) != 0) {
+		uint32_t mask = wue_options >> 16;
+		unattend_xml_mask &= ~mask;
+		unattend_xml_mask |= (wue_options & mask);
+	}
 	// We want above normal priority by default, so we offset the value.
 	default_thread_priority = ReadSetting32(SETTING_DEFAULT_THREAD_PRIORITY) + THREAD_PRIORITY_ABOVE_NORMAL;
 
@@ -3690,9 +3771,8 @@ relaunch:
 		// Ctrl-T => Alternate Test mode that doesn't require a full rebuild
 		if ((ctrl_without_focus || ((GetKeyState(VK_CONTROL) & 0x8000) && (msg.message == WM_KEYDOWN)))
 			&& (msg.wParam == 'T')) {
-			//extern int TestChecksum(void);
-			//TestChecksum();
-			ListVdsVolumes(FALSE);
+			int index = 2;
+			uprintf("Index %d is %s", index, WimIsValidIndex("C:\\tmp\\boot1.wim", index) ? "valid" : "invalid");
 			continue;
 		}
 #endif
@@ -3866,7 +3946,7 @@ relaunch:
 			if ((msg.message == WM_SYSKEYDOWN) && (msg.wParam == 'Q')) {
 				enable_file_indexing = !enable_file_indexing;
 				WriteSettingBool(SETTING_ENABLE_FILE_INDEXING, enable_file_indexing);
-				PrintStatusTimeout(lmprintf(MSG_290), !enable_file_indexing);
+				PrintStatusTimeout(lmprintf(MSG_290), enable_file_indexing);
 				continue;
 			}
 			// Alt-R => Remove all the registry keys that may have been created by Rufus

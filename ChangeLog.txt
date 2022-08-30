@@ -1,3 +1,35 @@
+o Version 3.20 (2022.08.03)
+    Enable applicable Windows User Experience options for Windows 10
+    Remember last Windows User Experience selection between sessions
+    Add automatic local account creation and regional options duplication
+    (NB: This is limited to creating an account with the same name as the current user and
+     with an empty password that the user will be prompted to change after first reboot)
+    Add a workaround for ISOs that have a 'syslinux' symbolic link to '/isolinux/' (Knoppix)
+    Revert to offline insertion of registry keys for the TPM/SB/RAM bypass where possible
+    Remove storage bypass, since this is a bogus bypass that doesn't do anything
+    Improve BIOS compatibility when displaying the "UEFI boot only" alert message
+    Fix Windows User Experience dialog appearing twice for Windows To Go
+    Fix Windows User Experience options not being applied for ARM64
+    Fix Microsoft Account bypass not being applied unless TPM/SB/RAM bypass is selected
+    Fix overeager detection of GRUB2 bootloaders with nonstandard prefixes
+
+o Version 3.19 (2022.07.01)
+    Add a new selection dialog for Windows 11 setup customization:
+      - Secure Boot and TPM bypass have now been moved to this dialog
+      - Also allows to bypass the mandatory requirement for a Microsoft account on Windows 11 22H2
+        (NB: Network *MUST* be temporarily disabled for the local account creation to be proposed)
+      - Also add an option to skip all collection questions (Sets all answers to "Don't allow")
+      - Also add an option for setting internal drives offline for Windows To Go
+      Note: These customization options are only proposed when using a Windows 11 image.
+    Add support for distros using a nonstandard GRUB 2.0 prefix directory (openSUSE Live, GeckoLinux)
+    Add the ability to ignore USBs (See https://github.com/pbatard/rufus/blob/master/res/rufus.ini)
+    Change drive listing to always list in increasing order of size
+    Update exceptions needed by Red Hat and derivatives for the 9.x releases
+    Update UEFI:NTFS drivers to latest
+    Reassign a letter for drives written in DD mode that don't have an ESP (e.g. CoreELEC)
+    Fix Windows refusing to mount Linux MBR partitions on FIXED drives
+    Fix support for multiextent files when Joliet is in use
+
 o Version 3.18 (2022.03.11)
     Fix DLL sideloading vulnerabilities
     Fix ISO → ESP creation when running on Windows 11

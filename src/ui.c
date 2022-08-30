@@ -46,6 +46,7 @@ UINT_PTR UM_LANGUAGE_MENU_MAX = UM_LANGUAGE_MENU;
 HIMAGELIST hUpImageList, hDownImageList;
 extern BOOL use_vds, appstore_version;
 extern int imop_win_sel;
+extern char* unattend_xml_path;
 int update_progress_type = UPT_PERCENT;
 int advanced_device_section_height, advanced_format_section_height;
 // (empty) check box width, (empty) drop down width, button height (for and without dropdown match)
@@ -274,8 +275,6 @@ void GetFullWidth(HWND hDlg)
 	// Go through the Image Options for Windows To Go
 	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_117)).cx);
 	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_118)).cx);
-	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_322)).cx);
-	fw = max(fw, GetTextSize(hImageOption, lmprintf(MSG_323)).cx);
 
 	// Now deal with full length checkbox lines
 	for (i = 0; i<ARRAYSIZE(full_width_checkboxes); i++)
@@ -1182,7 +1181,8 @@ void InitProgress(BOOL bOnlyFormat)
 				break;
 			case BT_IMAGE:
 				nb_slots[OP_FILE_COPY] = (img_report.is_iso || img_report.is_windows_img) ? -1 : 0;
-				if (HAS_WINDOWS(img_report) && ComboBox_GetCurItemData(hImageOption) == IMOP_WIN_EXTENDED)
+				if (HAS_WINDOWS(img_report) && (unattend_xml_path != NULL) &&
+					(ComboBox_GetCurItemData(hImageOption) != IMOP_WIN_TO_GO))
 					nb_slots[OP_PATCH] = -1;
 				break;
 			default:
@@ -1201,7 +1201,7 @@ void InitProgress(BOOL bOnlyFormat)
 			// So, yeah, if you're doing slow format, or using Large FAT32, and have persistence, you'll see
 			// the progress bar revert during format on account that we reuse the same operation for both
 			// partitions. Maybe one day I'll be bothered to handle two separate OP_FORMAT ops...
-			if ((!IsChecked(IDC_QUICK_FORMAT)) || (persistence_size != 0) || (fs_type >= FS_EXT2) ||
+			if ((!IsChecked(IDC_QUICK_FORMAT)) || (persistence_size != 0) || IS_EXT(fs_type) ||
 				((fs_type == FS_FAT32) && ((SelectedDrive.DiskSize >= LARGE_FAT32_SIZE) || (force_large_fat32)))) {
 				nb_slots[OP_FORMAT] = -1;
 				nb_slots[OP_CREATE_FS] = 0;
